@@ -1,0 +1,8 @@
+bin/
+models/
+.idea/
+.vscode/
+*.iml
+.claude/
+.DS_Store
+Thumbs.db
