@@ -101,7 +101,7 @@ Re-subscribing to a mod or having Steam re-validate workshop content will overwr
 All builds drop into `bin/`. Run `make help` for the full list. The common ones:
 
 ```bash
-make build              # Linux x86-64 → bin/paradox-localize
+make build-linux        # bin/paradox-localize-linux-amd64
 make build-windows      # cross-compile → bin/paradox-localize-windows-amd64.exe
 make build-mac-intel    # cross-compile → bin/paradox-localize-macos-amd64
 make build-mac-arm      # cross-compile → bin/paradox-localize-macos-arm64

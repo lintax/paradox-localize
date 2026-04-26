@@ -23,14 +23,14 @@ MAC_AMD64_CC ?= o64-clang
 MAC_ARM64_CC ?= aarch64-apple-darwin23.5-clang
 
 # Output paths
-LINUX_BIN     := $(BIN_DIR)/$(BINARY)
+LINUX_BIN     := $(BIN_DIR)/$(BINARY)-linux-amd64
 WINDOWS_BIN   := $(BIN_DIR)/$(BINARY)-windows-amd64.exe
 MAC_INTEL_BIN := $(BIN_DIR)/$(BINARY)-macos-amd64
 MAC_ARM_BIN   := $(BIN_DIR)/$(BINARY)-macos-arm64
 
 # --- Phony targets ---------------------------------------------------------
 
-.PHONY: help build run test vet fmt fmt-check tidy check clean version \
+.PHONY: help run test vet fmt fmt-check tidy check clean version \
         build-linux build-windows build-mac-intel build-mac-arm build-all release
 
 help: ## Show this help
@@ -40,9 +40,7 @@ help: ## Show this help
 
 # --- Local development -----------------------------------------------------
 
-build: build-linux ## Build for the current platform into bin/
-
-run: build ## Build and run the GUI
+run: build-linux ## Build and run the GUI
 	./$(LINUX_BIN)
 
 test: ## Run unit tests
