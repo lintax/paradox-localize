@@ -300,6 +300,11 @@ func (t *Translator) Close() error {
 	return t.backend.Close()
 }
 
+// CacheDir returns the platform-specific cache directory of the application.
+func CacheDir() string {
+	return getCacheDir()
+}
+
 // getCacheDir returns the platform-specific cache directory for translation cache files.
 func getCacheDir() string {
 	var cacheDir string

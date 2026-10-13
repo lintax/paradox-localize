@@ -25,7 +25,7 @@ type Selection struct {
 	ClearCache         bool
 	RetranslateEnglish bool
 
-	BackendType  string // "ollama" or "openai"
+	BackendType  string // "ollama", "openai" or "lloc"
 	OllamaURL    string
 	OllamaModel  string
 	OpenAIURL    string
@@ -45,8 +45,15 @@ type GUI struct {
 	logMutex     sync.Mutex
 	logText      string
 
-	sel        Selection
-	onComplete func(Selection)
+	sel           Selection
+	onComplete    func(Selection)
+	llocAvailable bool
+}
+
+// EnableLloc offers the lloc backend on the selection screen. Call it before
+// ShowSelectionScreen, and only when lloc is actually usable.
+func (g *GUI) EnableLloc() {
+	g.llocAvailable = true
 }
 
 // NewGUI creates a new GUI instance.
@@ -73,6 +80,11 @@ const (
 
 	backendOllama = "ollama"
 	backendOpenAI = "openai"
+	backendLloc   = "lloc"
+
+	backendOllamaLabel = "Local Ollama"
+	backendOpenAILabel = "Cloud LLM (OpenAI-compatible)"
+	backendLlocLabel   = "lloc (Ollama Cloud)"
 )
 
 // ShowSelectionScreen displays the initial configuration screen.
@@ -152,6 +164,9 @@ func (g *GUI) ShowSelectionScreen(installedGames []config.InstalledGame, onCompl
 
 	// Backend selector
 	g.sel.BackendType = prefs.StringWithFallback(prefKeyBackendType, backendOllama)
+	if g.sel.BackendType == backendLloc && !g.llocAvailable {
+		g.sel.BackendType = backendOllama
+	}
 	g.sel.OllamaURL = prefs.StringWithFallback(prefKeyOllamaURL, "")
 	g.sel.OllamaModel = prefs.StringWithFallback(prefKeyOllamaModel, "")
 	g.sel.OpenAIURL = prefs.StringWithFallback(prefKeyOpenAIURL, "")
@@ -204,29 +219,44 @@ func (g *GUI) ShowSelectionScreen(installedGames []config.InstalledGame, onCompl
 		openaiKeyNote,
 	)
 
+	llocNote := widget.NewLabel(
+		"Translates with two Ollama Cloud models and a judge, and takes terminology from the game's " +
+			"official localization. Mod entries left in English are always re-translated.",
+	)
+	llocNote.Wrapping = fyne.TextWrapWord
+	llocFields := container.NewVBox(llocNote)
+
 	updateBackendVisibility := func() {
 		ollamaFields.Hidden = g.sel.BackendType != backendOllama
 		openaiFields.Hidden = g.sel.BackendType != backendOpenAI
+		llocFields.Hidden = g.sel.BackendType != backendLloc
+		retranslateCheck.Hidden = g.sel.BackendType == backendLloc
 		ollamaFields.Refresh()
 		openaiFields.Refresh()
+		llocFields.Refresh()
+		retranslateCheck.Refresh()
 	}
 
-	backendRadio := widget.NewRadioGroup(
-		[]string{"Local Ollama", "Cloud LLM (OpenAI-compatible)"},
-		func(selected string) {
-			if strings.HasPrefix(selected, "Local") {
-				g.sel.BackendType = backendOllama
-			} else {
-				g.sel.BackendType = backendOpenAI
-			}
-			updateBackendVisibility()
-		},
-	)
+	backendByLabel := map[string]string{
+		backendOllamaLabel: backendOllama,
+		backendOpenAILabel: backendOpenAI,
+		backendLlocLabel:   backendLloc,
+	}
+	backendLabels := []string{backendOllamaLabel, backendOpenAILabel}
+	if g.llocAvailable {
+		backendLabels = append(backendLabels, backendLlocLabel)
+	}
+	backendRadio := widget.NewRadioGroup(backendLabels, func(selected string) {
+		if backend, ok := backendByLabel[selected]; ok {
+			g.sel.BackendType = backend
+		}
+		updateBackendVisibility()
+	})
 	backendRadio.Horizontal = true
-	if g.sel.BackendType == backendOpenAI {
-		backendRadio.SetSelected("Cloud LLM (OpenAI-compatible)")
-	} else {
-		backendRadio.SetSelected("Local Ollama")
+	for label, backend := range backendByLabel {
+		if backend == g.sel.BackendType {
+			backendRadio.SetSelected(label)
+		}
 	}
 
 	translateNote := widget.NewLabel(
@@ -242,6 +272,7 @@ func (g *GUI) ShowSelectionScreen(installedGames []config.InstalledGame, onCompl
 		backendRadio,
 		ollamaFields,
 		openaiFields,
+		llocFields,
 		widget.NewSeparator(),
 		retranslateCheck,
 		clearCacheCheck,

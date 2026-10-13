@@ -10,6 +10,7 @@ import (
 
 	"github.com/lintax/paradox-localize/internal/config"
 	"github.com/lintax/paradox-localize/internal/gui"
+	"github.com/lintax/paradox-localize/internal/lloc"
 	"github.com/lintax/paradox-localize/internal/localization"
 	"github.com/lintax/paradox-localize/internal/mod"
 	"github.com/lintax/paradox-localize/internal/translation"
@@ -26,11 +27,20 @@ func main() {
 
 	installedGames := config.DetectInstalledGames()
 
+	// The lloc backend is offered only where it can actually run.
+	llocEnv := lloc.Detect()
+
 	g := gui.NewGUI()
+	if llocEnv != nil {
+		g.EnableLloc()
+	}
 	g.ShowSelectionScreen(installedGames, func(sel gui.Selection) {
-		processWithGUI(g, sel)
+		processWithGUI(g, sel, llocEnv)
 	})
 	g.ShowAndRun()
+
+	// the window is closed: do not leave a translation running behind it
+	lloc.Stop()
 }
 
 // backendConfigFromSelection translates GUI choices into a translation.BackendConfig.
@@ -53,7 +63,7 @@ func backendConfigFromSelection(sel gui.Selection) translation.BackendConfig {
 }
 
 // processWithGUI handles the main processing logic with GUI output.
-func processWithGUI(g *gui.GUI, sel gui.Selection) {
+func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 	debug := true
 
 	g.SetStatus("Initializing...")
@@ -126,6 +136,11 @@ func processWithGUI(g *gui.GUI, sel gui.Selection) {
 		}
 		g.Log("✅ Deleted %d consolidated files", totalCount)
 		g.Log("")
+	}
+
+	if enableTranslation && sel.BackendType == "lloc" && llocEnv != nil {
+		processWithLloc(g, sel, llocEnv, workshopDir)
+		return
 	}
 
 	if sel.ClearCache && enableTranslation && sel.Language != "all" {
@@ -343,6 +358,109 @@ func processWithGUI(g *gui.GUI, sel gui.Selection) {
 		g.Log("  Cache hit rate:         %.1f%%", stats.CacheHitRate())
 	}
 
+	g.Log("\nDone! You can now launch the game and enable the target language.")
+}
+
+// processWithLloc translates every mod of the game through lloc and writes
+// the same consolidated files as the built-in backends. Keys lloc leaves out
+// (script-only values, strings it could not translate safely) are filled with
+// the English text, so the game never shows raw key names.
+func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir string) {
+	langCode := config.LanguageCodes[sel.Language]
+	langName := config.Languages[sel.Language]
+	workspace := filepath.Join(translation.CacheDir(), "lloc", sel.Game)
+
+	if sel.ClearCache {
+		g.Log("Clearing lloc translations for this game...")
+		if err := os.RemoveAll(workspace); err != nil {
+			g.Log("Warning: Failed to clear lloc workspace: %v", err)
+		}
+	}
+
+	g.SetStatus("Scanning mods...")
+	entries, err := os.ReadDir(workshopDir)
+	if err != nil {
+		g.Log("ERROR: Failed to read workshop directory: %v", err)
+		return
+	}
+
+	type scanned struct {
+		mod       lloc.Mod
+		english   map[string]string
+		modOwner  map[string]string
+		locRoot   string
+		dirName   string
+		processed bool
+	}
+	var mods []scanned
+	job := &lloc.Job{
+		Env:         env,
+		Workspace:   workspace,
+		GameName:    config.Games[sel.Game],
+		GameContext: config.GameContexts[sel.Game],
+		Lang:        config.ISO639Codes[sel.Language],
+		LangName:    langCode,
+		LangDisplay: langName,
+		Log:         g.Log,
+		LogUpdate:   g.LogUpdate,
+		Status:      g.SetStatus,
+	}
+	if dir, ok := lloc.GameInstallDirs[sel.Game]; ok {
+		// <steamapps>/workshop/content/<id>  ->  <steamapps>/common/<game>
+		steamapps := filepath.Dir(filepath.Dir(filepath.Dir(workshopDir)))
+		job.GameDir = filepath.Join(steamapps, "common", dir)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		modPath := filepath.Join(workshopDir, entry.Name())
+		english, modOwner, _, locRoot := localization.ScanModLocalization(modPath, langCode, false)
+		if len(english) == 0 || locRoot == "" {
+			continue
+		}
+		m := lloc.Mod{ID: entry.Name(), Name: mod.Name(modPath, entry.Name()), Path: modPath, Tags: mod.Tags(modPath)}
+		mods = append(mods, scanned{mod: m, english: english, modOwner: modOwner, locRoot: locRoot, dirName: entry.Name()})
+		job.Mods = append(job.Mods, m)
+	}
+	g.Log("Found %d mods with English localization (lloc: %s)\n", len(mods), env.Dir)
+
+	if err := job.Run(); err != nil {
+		g.Log("⚠ lloc stopped: %v", err)
+		g.Log("Writing what has been translated so far; run again to continue.")
+	}
+
+	g.SetStatus("Writing localization files...")
+	written, translatedTotal, englishTotal := 0, 0, 0
+	for _, s := range mods {
+		translated, _ := localization.ParseLocalizationFile(job.OutputFile(s.mod.ID))
+		all := make(map[string]string, len(s.english))
+		translatedCount, englishCount := 0, 0
+		for key, englishText := range s.english {
+			if text, ok := translated[key]; ok {
+				all[key] = text
+				translatedCount++
+			} else if _, owned := s.modOwner[key]; !owned {
+				all[key] = englishText
+				englishCount++
+			}
+		}
+		if len(all) == 0 {
+			g.Log("  ✓ %s: already translated by the mod author", s.mod.Name)
+			continue
+		}
+		if err := localization.WriteConsolidatedFile(s.locRoot, langCode, s.dirName, all); err != nil {
+			g.Log("  ✗ %s: failed to write consolidated file: %v", s.mod.Name, err)
+			continue
+		}
+		written++
+		translatedTotal += translatedCount
+		englishTotal += englishCount
+		g.Log("  ✅ %s: %d translated, %d kept in English", s.mod.Name, translatedCount, englishCount)
+	}
+
+	g.SetStatus("✅ Completed!")
+	g.Log("\n✅ Completed! Wrote %d mods: %d strings translated, %d kept in English", written, translatedTotal, englishTotal)
 	g.Log("\nDone! You can now launch the game and enable the target language.")
 }
 

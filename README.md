@@ -53,6 +53,18 @@ Pick "Cloud LLM (OpenAI-compatible)" and fill in:
 
 Bring-your-own-key avoids bundling any third-party credentials in the binary.
 
+### lloc (experimental, shown only when available)
+
+A third backend, "lloc (Ollama Cloud)", appears in the list when all of these are found at startup:
+
+- **Python 3.11+** on `PATH`;
+- a checkout of [lloc](https://github.com/lintax/lloc) in a `lloc` folder next to this tool (or one or two levels up), or wherever `LLOC_DIR` points;
+- a local **Ollama** daemon signed in to Ollama Cloud (`ollama signin`).
+
+Each string is translated by two cloud models and compared by a third; game script syntax is validated instead of masked; and terminology comes from the game's own official localization, which is read once from the game's install folder. Mod entries left in English by the author are always re-translated. Anything lloc leaves out is filled with the English text, as with the other backends.
+
+Its state lives in `<cache dir>/lloc/<game>/` and is incremental: an interrupted run continues where it stopped, and "Clear translation cache" removes it.
+
 ---
 
 ## How it works

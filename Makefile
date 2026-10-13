@@ -88,19 +88,24 @@ release: clean build-all ## Clean rebuild of every platform (use for tagged rele
 
 # --- Recipes ---------------------------------------------------------------
 
-$(LINUX_BIN): | $(BIN_DIR)
+# The binaries always go through `go build`: make cannot see the Go sources,
+# and Go's own build cache makes an unchanged rebuild instant.
+.PHONY: FORCE
+FORCE:
+
+$(LINUX_BIN): FORCE | $(BIN_DIR)
 	$(GO) build -ldflags "$(LDFLAGS)" -o $@ .
 
-$(WINDOWS_BIN): | $(BIN_DIR)
+$(WINDOWS_BIN): FORCE | $(BIN_DIR)
 	CC=$(WIN_AMD64_CC) CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
 	    $(GO) build -ldflags "$(LDFLAGS)" -o $@ .
 
-$(MAC_INTEL_BIN): | $(BIN_DIR)
+$(MAC_INTEL_BIN): FORCE | $(BIN_DIR)
 	PATH="$(OSXCROSS_BIN):$(LLVM_BIN):$$PATH" \
 	CC=$(MAC_AMD64_CC) CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
 	    $(GO) build -ldflags "$(LDFLAGS)" -o $@ .
 
-$(MAC_ARM_BIN): | $(BIN_DIR)
+$(MAC_ARM_BIN): FORCE | $(BIN_DIR)
 	PATH="$(OSXCROSS_BIN):$(LLVM_BIN):$$PATH" \
 	CC=$(MAC_ARM64_CC) CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 	    $(GO) build -ldflags "$(LDFLAGS)" -o $@ .
