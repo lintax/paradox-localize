@@ -247,6 +247,7 @@ type Job struct {
 	batchesDone map[string]int  // per mod: finished batches, in any order
 	failed      map[string]int  // per mod: strings an ensemble gave up on so far
 	failedKeys  int             // FAILED lines in the final report of a run
+	failedDone  int             // strings counted done as given up on in this attempt
 	fatal       bool            // the current attempt hit a fatal error
 }
 
@@ -301,7 +302,7 @@ func (j *Job) Run() error {
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		j.active, j.batchesDone, j.failed = map[string]bool{}, map[string]int{}, map[string]int{}
-		j.failedKeys, j.fatal = 0, false
+		j.failedKeys, j.failedDone, j.fatal = 0, 0, false
 		before := j.done
 		err = j.run(j.Workspace, j.report, "translate", "--lang", j.Lang)
 		if j.failedKeys > 0 {
@@ -324,6 +325,11 @@ func (j *Job) Run() error {
 		}
 		j.note(fmt.Sprintf("  ⚠ lloc stopped (%v); continuing where it left off (attempt %d/%d)...",
 			err, attempt+1, maxAttempts))
+		// the next attempt retries the strings given up on: they are not done
+		j.done -= j.failedDone
+		if pending := j.countPending(); pending > 0 {
+			j.total = j.done + pending
+		}
 	}
 	if ctxErr := j.ctx().Err(); ctxErr != nil {
 		return ctxErr
@@ -810,6 +816,7 @@ func (j *Job) report(line string) {
 			failed, j.failed[m[1]] = failed-j.failed[m[1]], failed
 		}
 		count += failed
+		j.failedDone += failed
 		j.done += count
 		if j.done > j.total {
 			j.total = j.done
