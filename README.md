@@ -61,7 +61,7 @@ A third backend, "lloc (Ollama Cloud)", appears in the list when all of these ar
 - a checkout of [lloc](https://github.com/lintax/lloc) in a `lloc` folder next to this tool (or one or two levels up), or wherever `LLOC_DIR` points;
 - a local **Ollama** daemon signed in to Ollama Cloud (`ollama signin`).
 
-Each string is translated by two cloud models and compared by a third; game script syntax is validated instead of masked; and terminology comes from the game's own official localization, which is read once from the game's install folder. Mod entries left in English by the author are always re-translated. Anything lloc leaves out is filled with the English text, as with the other backends.
+Strings are translated by one cloud model (lloc's second translator and judge are switched off: on mod texts they changed about 6% of the strings, mostly in style, for three times the requests). Game script syntax is validated instead of masked: a string that loses a placeholder, a `§Y…§!` colour code or comes back in the wrong alphabet is sent back with the error, and if it still fails it stays in English and is retried on the next run. Terminology comes from the game's own official localization, which is read once from the game's install folder. Mod entries left in English by the author are always re-translated. Anything lloc leaves out is filled with the English text, as with the other backends.
 
 Its state lives in `<cache dir>/lloc/<game>/` and is incremental: an interrupted run continues where it stopped, and "Clear translation cache" removes it. If lloc stops on a fatal error (a dropped connection, a crash), the run is restarted automatically up to three times; a mod lloc cannot read is skipped without losing its earlier translations.
 

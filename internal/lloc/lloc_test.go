@@ -65,6 +65,69 @@ func TestReportProgress(t *testing.T) {
 	}
 }
 
+// One model: "failed" in a batch line counts that batch only.
+func TestReportProgressOneModel(t *testing.T) {
+	var log []string
+	j := &Job{
+		Mods:  []Mod{{ID: "123", Name: "Big Mod"}},
+		total: 60,
+		Log:   func(format string, args ...interface{}) { log = append(log, fmt.Sprintf(format, args...)) },
+		LogUpdate: func(format string, args ...interface{}) {
+			log[len(log)-1] = fmt.Sprintf(format, args...)
+		},
+		Status: func(string) {},
+	}
+	j.Log("%s", j.progressLine())
+	for _, line := range []string{
+		"[mods/123:ru] batch 1/3: translating 20 strings...",
+		"[mods/123:ru] batch 1/3: +18 in 12.3s, failed 2",
+		"[mods/123:ru] batch 2/3: translating 20 strings...",
+		"[mods/123:ru] batch 2/3: still working, 30s...",
+		"[mods/123:ru] batch 2/3: +20 in 41.0s",
+		"[mods/123:ru] batch 3/3: translating 20 strings...",
+		"[mods/123:ru] batch 3/3: +19 in 9.8s, failed 1",
+		"[mods/123:ru] FAILED key_a: placeholder $X$ missing",
+	} {
+		j.report(line)
+	}
+	if j.done != 60 {
+		t.Errorf("done = %d, want 60", j.done)
+	}
+	want := []string{"  ✓ Big Mod translated", "  Progress: 60/60 strings (100%)"}
+	if strings.Join(log, "|") != strings.Join(want, "|") {
+		t.Errorf("log = %q, want %q", log, want)
+	}
+	if len(j.active) != 0 || j.failedKeys != 1 {
+		t.Errorf("active = %v, failedKeys = %d", j.active, j.failedKeys)
+	}
+}
+
+// lloc runs the batches of a mod in parallel: the last one may finish first.
+func TestReportBatchesOutOfOrder(t *testing.T) {
+	var log []string
+	j := &Job{Mods: []Mod{{ID: "1", Name: "One"}}, total: 30,
+		Log:       func(format string, args ...interface{}) { log = append(log, fmt.Sprintf(format, args...)) },
+		LogUpdate: func(format string, args ...interface{}) { log[len(log)-1] = fmt.Sprintf(format, args...) },
+		Status:    func(string) {}}
+	j.Log("%s", j.progressLine())
+	for _, line := range []string{
+		"[mods/1:ru] batch 1/3: translating 10 strings...",
+		"[mods/1:ru] batch 2/3: translating 10 strings...",
+		"[mods/1:ru] batch 3/3: translating 10 strings...",
+		"[mods/1:ru] batch 3/3: +10 in 5.0s",
+		"[mods/1:ru] batch 1/3: +10 in 6.0s",
+	} {
+		j.report(line)
+	}
+	if !j.active["1"] || strings.Contains(strings.Join(log, "|"), "translated") {
+		t.Fatalf("mod finished too early: active = %v, log = %q", j.active, log)
+	}
+	j.report("[mods/1:ru] batch 2/3: +10 in 7.0s")
+	if j.active["1"] || !strings.Contains(strings.Join(log, "|"), "✓ One translated") {
+		t.Errorf("mod not finished: active = %v, log = %q", j.active, log)
+	}
+}
+
 func TestStatusLineCountsActiveMods(t *testing.T) {
 	var status string
 	j := &Job{Mods: []Mod{{ID: "1", Name: "One"}, {ID: "2", Name: "Two"}}, total: 40,

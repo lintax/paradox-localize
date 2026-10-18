@@ -244,7 +244,8 @@ type Job struct {
 	total, done int // strings to translate in this run / finished so far
 	started     time.Time
 	active      map[string]bool // mods with a batch in flight
-	failed      map[string]int  // per mod: strings lloc gave up on so far
+	batchesDone map[string]int  // per mod: finished batches, in any order
+	failed      map[string]int  // per mod: strings an ensemble gave up on so far
 	failedKeys  int             // FAILED lines in the final report of a run
 	fatal       bool            // the current attempt hit a fatal error
 }
@@ -294,12 +295,13 @@ func (j *Job) Run() error {
 		j.Log("\nEverything is already translated.")
 		return nil
 	}
-	j.Log("\nTranslating %d strings in %d mods with lloc (two models and a judge)...", j.total, prepared)
+	j.Log("\nTranslating %d strings in %d mods with lloc (one model, syntax-checked)...", j.total, prepared)
 	j.Log("%s", j.progressLine())
 	j.started = time.Now()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		j.active, j.failed, j.failedKeys, j.fatal = map[string]bool{}, map[string]int{}, 0, false
+		j.active, j.batchesDone, j.failed = map[string]bool{}, map[string]int{}, map[string]int{}
+		j.failedKeys, j.fatal = 0, false
 		before := j.done
 		err = j.run(j.Workspace, j.report, "translate", "--lang", j.Lang)
 		if j.failedKeys > 0 {
@@ -331,6 +333,9 @@ func (j *Job) Run() error {
 
 // buildTimeout bounds `lloc build`: it only writes files from what is saved.
 const buildTimeout = 2 * time.Minute
+
+// requestTimeoutSec bounds one lloc request to the model (see writeWorkspaceConfig).
+const requestTimeoutSec = 120
 
 // build writes lloc's output files from everything translated so far.
 // `translate` does it only at the end of a complete run, so after a stop or
@@ -375,9 +380,12 @@ func (j *Job) prepare() (int, error) {
 	return prepared, nil
 }
 
-// writeWorkspaceConfig writes l10n/config.toml. The profile and the
-// concurrent ensemble are pinned: progress is read from the log lines of
-// exactly this mode.
+// writeWorkspaceConfig writes l10n/config.toml. One model translates: the
+// profile's second translator and judge are switched off by semantic = "off".
+// On mod texts they agreed on 80% of the strings and changed about 6%, mostly
+// in style, for three times the requests. Placeholder and script checks do not
+// depend on it: a string that breaks them is sent back with the error and,
+// failing that, stays in English until the next run.
 func (j *Job) writeWorkspaceConfig(hasVanilla bool) error {
 	members := `"` + modsDir + `/*"`
 	if hasVanilla {
@@ -388,9 +396,12 @@ func (j *Job) writeWorkspaceConfig(hasVanilla bool) error {
 		"tone = " + tomlString(defaultTone) + "\n\n" +
 		"[ollama]\n" +
 		"profile = \"cloud\"\n" +
+		// Cloud replies take 4-16 s, under a minute at worst; a request that
+		// hangs ends in a 502 after 3-10 min. Its retry is cheaper than the wait.
+		"timeout_sec = " + strconv.Itoa(requestTimeoutSec) + "\n" +
 		"prompts_dir = " + tomlString(filepath.Join(j.Env.Dir, "prompts", "paradox")) + "\n\n" +
 		"[validation]\n" +
-		"ensemble_concurrency = \"batch\"\n"
+		"semantic = \"off\"\n"
 	writeIfChanged(filepath.Join(j.Workspace, "l10n", "config.toml"), config)
 	return nil
 }
@@ -767,12 +778,15 @@ func firstLine(err error) string {
 }
 
 var (
-	// "[mods/<id>:ru] A+B 3/21: translating 20 strings (2 models)..."
-	batchStartRe = regexp.MustCompile(`^\[` + modsDir + `/([^:\]]+)[^\]]*\] A\+B (\d+)/(\d+): translating`)
-	// "[mods/<id>:ru] A+B 3/21: +20 judged, failed 2": batch 3 of 21 is
-	// finished; "failed" counts the mod's strings given up on so far
-	batchDoneRe = regexp.MustCompile(`^\[` + modsDir + `/([^:\]]+)[^\]]*\] A\+B (\d+)/(\d+): \+(\d+) judged(?:, failed (\d+))?`)
-	// "[mods/<id>:ru] A+B 3/21: still working, 90s..."
+	// "[mods/<id>:ru] batch 3/21: translating 20 strings..." (one model) or
+	// "[mods/<id>:ru] A+B 3/21: translating 20 strings (2 models)..." (ensemble)
+	batchStartRe = regexp.MustCompile(`^\[` + modsDir + `/([^:\]]+)[^\]]*\] (?:batch|A\+B) (\d+)/(\d+): translating`)
+	// "[mods/<id>:ru] batch 3/21: +18 in 12.3s, failed 2": batch 3 of 21 is
+	// finished, "failed" counts the strings of this batch given up on.
+	// "[mods/<id>:ru] A+B 3/21: +20 judged, failed 2": the same in an
+	// ensemble, where "failed" counts the mod's strings so far.
+	batchDoneRe = regexp.MustCompile(`^\[` + modsDir + `/([^:\]]+)[^\]]*\] (?:batch|A\+B) (\d+)/(\d+): \+(\d+)( judged| in [\d.]+s)(?:, failed (\d+))?`)
+	// "[mods/<id>:ru] batch 3/21: still working, 90s..."
 	heartbeatRe = regexp.MustCompile(`still working, (\d+)s`)
 )
 
@@ -781,7 +795,7 @@ var (
 // Per-batch and per-string detail is left out: a full run has thousands.
 func (j *Job) report(line string) {
 	if j.active == nil {
-		j.active, j.failed = map[string]bool{}, map[string]int{}
+		j.active, j.batchesDone, j.failed = map[string]bool{}, map[string]int{}, map[string]int{}
 	}
 	if m := batchStartRe.FindStringSubmatch(line); m != nil {
 		j.active[m[1]] = true
@@ -790,15 +804,19 @@ func (j *Job) report(line string) {
 	}
 	if m := batchDoneRe.FindStringSubmatch(line); m != nil {
 		count, _ := strconv.Atoi(m[4])
-		failed, _ := strconv.Atoi(m[5])
+		failed, _ := strconv.Atoi(m[6])
 		// strings lloc gave up on are done as well: they stay in English
-		count += failed - j.failed[m[1]]
-		j.failed[m[1]] = failed
+		if m[5] == " judged" {
+			failed, j.failed[m[1]] = failed-j.failed[m[1]], failed
+		}
+		count += failed
 		j.done += count
 		if j.done > j.total {
 			j.total = j.done
 		}
-		if m[2] == m[3] {
+		// lloc runs the batches of a mod in parallel: they finish in any order
+		j.batchesDone[m[1]]++
+		if total, _ := strconv.Atoi(m[3]); j.batchesDone[m[1]] >= total {
 			delete(j.active, m[1])
 			j.note("  ✓ " + j.modName(m[1]) + " translated")
 		} else {

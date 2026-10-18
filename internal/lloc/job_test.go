@@ -54,16 +54,16 @@ if cmd == "translate":
     n = int(open(state).read()) if os.path.exists(state) else 0
     open(state, "w").write(str(n + 1))
     if mode == "flaky" and n == 0:
-        print("[mods/1:ru] A+B 1/2: translating 10 strings (2 models)...", flush=True)
-        print("[mods/1:ru] A+B 1/2: +10 judged", flush=True)
+        print("[mods/1:ru] batch 1/2: translating 10 strings...", flush=True)
+        print("[mods/1:ru] batch 1/2: +10 in 3.2s", flush=True)
         print("[mods/1:ru] FATAL connection to Ollama lost", flush=True)
         sys.exit(1)
     if mode == "bad-config":
         print("error: l10n/config.toml: bad key", flush=True)
         sys.exit(2)
     if mode == "flaky":
-        print("[mods/1:ru] A+B 2/2: translating 10 strings (2 models)...", flush=True)
-        print("[mods/1:ru] A+B 2/2: +9 judged, failed 1", flush=True)
+        print("[mods/1:ru] batch 2/2: translating 10 strings...", flush=True)
+        print("[mods/1:ru] batch 2/2: +9 in 2.9s, failed 1", flush=True)
         print("[mods/1:ru] FAILED some_key: wrong script", flush=True)
         sys.exit(1)
     sys.exit(0)
