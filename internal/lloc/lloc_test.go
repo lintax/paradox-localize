@@ -39,19 +39,48 @@ func TestReportProgress(t *testing.T) {
 		"[mods/123:ru] ARBITRATED key: chose \"x\" over 2 candidate(s) (ensemble c1)",
 		"[mods/123:ru] C 1/3: agree 19, c1 1, c2 0 in 0.8s",
 		"[mods/123:ru] A+B 1/3: +20 judged",
-		"[mods/123:ru] A+B 2/3: +20 judged",
+		"[mods/123:ru] A+B 2/3: +18 judged, failed 2",
 		"server throttling (429): concurrency limit -> 44",
-		"[mods/123:ru] A+B 3/3: +20 judged",
+		"retrying after Ollama request timed out after 600s (attempt 2/3)",
+		"[mods/123:ru] A+B 3/3: +20 judged, failed 2",
+		"[mods/123:ru] FAILED key_a: wrong script",
+		"[mods/123:ru] FAILED key_b: wrong script",
 	} {
 		j.report(line)
 	}
 	want := []string{
 		"  server throttling (429): concurrency limit -> 44",
+		"  retrying after Ollama request timed out after 600s (attempt 2/3)",
 		"  ✓ Big Mod translated",
 		"  Progress: 60/60 strings (100%)",
 	}
 	if strings.Join(log, "|") != strings.Join(want, "|") {
 		t.Errorf("log = %q, want %q", log, want)
+	}
+	if j.failedKeys != 2 || j.fatal {
+		t.Errorf("failedKeys = %d, fatal = %v; want 2, false", j.failedKeys, j.fatal)
+	}
+	if len(j.active) != 0 {
+		t.Errorf("finished mod still counted as in progress: %v", j.active)
+	}
+}
+
+func TestStatusLineCountsActiveMods(t *testing.T) {
+	var status string
+	j := &Job{Mods: []Mod{{ID: "1", Name: "One"}, {ID: "2", Name: "Two"}}, total: 40,
+		Log: func(string, ...interface{}) {}, LogUpdate: func(string, ...interface{}) {},
+		Status: func(s string) { status = s }}
+	j.report("[mods/1:ru] A+B 1/2: translating 20 strings (2 models)...")
+	if want := "Translating: 0/40 strings — One"; status != want {
+		t.Errorf("status = %q, want %q", status, want)
+	}
+	j.report("[mods/2:ru] A+B 1/1: translating 20 strings (2 models)...")
+	if want := "Translating: 0/40 strings — 2 mods in progress"; status != want {
+		t.Errorf("status = %q, want %q", status, want)
+	}
+	j.report("[mods/2:ru] A+B 1/1: still working, 60s...")
+	if want := "Translating: 0/40 strings — 2 mods in progress (waiting for the models, 60s)"; status != want {
+		t.Errorf("status = %q, want %q", status, want)
 	}
 }
 

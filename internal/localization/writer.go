@@ -46,8 +46,16 @@ func WriteConsolidatedFile(localizationRoot string, targetLangCode string, modID
 	// Create second file (sorts last — 'z' after all letters)
 	// Try hardlink first (zero I/O), fall back to copy
 	secondPath := filepath.Join(langFolder, "zz_"+baseName)
-	os.Remove(secondPath) // remove existing before linking
-	if err := os.Link(firstPath, secondPath); err != nil {
+	// linked under a temporary name and renamed over the old copy, so the
+	// copy is never missing
+	linkTmp := secondPath + ".tmp"
+	os.Remove(linkTmp)
+	if err := os.Link(firstPath, linkTmp); err == nil {
+		if err := os.Rename(linkTmp, secondPath); err != nil {
+			os.Remove(linkTmp)
+			return err
+		}
+	} else {
 		// Hardlink failed (e.g. Windows or cross-device), fall back to copy
 		if err := copyFile(firstPath, secondPath); err != nil {
 			return err
@@ -57,14 +65,31 @@ func WriteConsolidatedFile(localizationRoot string, targetLangCode string, modID
 	return nil
 }
 
-// writeLocalizationFile writes a single localization .yml file
+// writeLocalizationFile writes a single localization .yml file. It writes a
+// temporary file and renames it into place, so an interrupted write (the
+// window closed, a crash) leaves the previous file intact, never half of one.
 func writeLocalizationFile(filePath, targetLangCode string, translations map[string]string) error {
-	file, err := os.Create(filePath)
+	tmp := filePath + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	err = writeLocalization(file, targetLangCode, translations)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		// also replaces the hard link "zz_" shares with it: that is relinked next
+		err = os.Rename(tmp, filePath)
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("failed to write %s: %w", filepath.Base(filePath), err)
+	}
+	return nil
+}
 
+func writeLocalization(file io.Writer, targetLangCode string, translations map[string]string) error {
 	writer := bufio.NewWriter(file)
 
 	// Write UTF-8 BOM
@@ -104,13 +129,21 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-
 	_, err = io.Copy(out, in)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
 	return err
 }
 

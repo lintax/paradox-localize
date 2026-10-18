@@ -1,7 +1,9 @@
 package translation
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +30,7 @@ type OllamaBackend struct {
 	systemPrompt     string
 	baseSystemPrompt string
 	logFn            LogFunc
+	ctx              context.Context
 }
 
 type ollamaChatRequest struct {
@@ -116,6 +119,7 @@ func NewOllamaBackend(cfg BackendConfig, targetLangName string, logFn LogFunc) (
 		targetLang: targetLangName,
 		client:     client,
 		logFn:      logFn,
+		ctx:        cfg.ctx(),
 	}
 	backend.baseSystemPrompt = buildBaseSystemPrompt(targetLangName)
 	backend.systemPrompt = backend.baseSystemPrompt
@@ -128,8 +132,13 @@ func NewOllamaBackend(cfg BackendConfig, targetLangName string, logFn LogFunc) (
 	return backend, nil
 }
 
-// TranslateText sends text to Ollama for translation.
+// TranslateText sends text to Ollama for translation, retrying server errors
+// and timeouts.
 func (b *OllamaBackend) TranslateText(text string) (string, error) {
+	return withRetry(b.ctx, b.logFn, func() (string, error) { return b.translateOnce(text) })
+}
+
+func (b *OllamaBackend) translateOnce(text string) (string, error) {
 	reqBody := ollamaChatRequest{
 		Model: b.model,
 		Messages: []ollamaMessage{
@@ -147,7 +156,12 @@ func (b *OllamaBackend) TranslateText(text string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := b.client.Post(b.baseURL+"/api/chat", "application/json", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(b.ctx, "POST", b.baseURL+"/api/chat", bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("ollama request failed: %w", err)
 	}
@@ -155,7 +169,7 @@ func (b *OllamaBackend) TranslateText(text string) (string, error) {
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
+		return "", newStatusError("ollama", resp, body)
 	}
 
 	var chatResp ollamaChatResponse
@@ -168,7 +182,7 @@ func (b *OllamaBackend) TranslateText(text string) (string, error) {
 
 // TranslateBatch translates multiple strings using parallel workers.
 func (b *OllamaBackend) TranslateBatch(texts []string, onProgress func(done, total int)) ([]string, error) {
-	return runParallelWorkers(texts, ollamaParallelWorkers, b.TranslateText, onProgress)
+	return runParallelWorkers(b.ctx, texts, ollamaParallelWorkers, b.TranslateText, onProgress)
 }
 
 // SetContext updates the system prompt with game and mod context.
@@ -184,7 +198,11 @@ func (b *OllamaBackend) Close() error { return nil }
 
 // ensureModel checks if the model is available and pulls it if needed.
 func (b *OllamaBackend) ensureModel() error {
-	resp, err := b.client.Get(b.baseURL + "/api/tags")
+	tagsReq, err := http.NewRequestWithContext(b.ctx, "GET", b.baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(tagsReq)
 	if err != nil {
 		return fmt.Errorf("failed to connect to Ollama: %w", err)
 	}
@@ -203,14 +221,19 @@ func (b *OllamaBackend) ensureModel() error {
 
 	b.logFn("  Model %s not found locally. Downloading (this may take several minutes)...", b.model)
 
-	pullReq := ollamaPullRequest{Name: b.model, Stream: false}
+	// Streamed, so a slow download is not cut off by a fixed timeout and the
+	// log can show how far it got; stopping the job aborts it.
+	pullReq := ollamaPullRequest{Name: b.model, Stream: true}
 	data, err := json.Marshal(pullReq)
 	if err != nil {
 		return fmt.Errorf("failed to marshal pull request: %w", err)
 	}
-
-	pullClient := &http.Client{Timeout: 30 * time.Minute}
-	pullResp, err := pullClient.Post(b.baseURL+"/api/pull", "application/json", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(b.ctx, "POST", b.baseURL+"/api/pull", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	pullResp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to pull model: %w", err)
 	}
@@ -221,7 +244,34 @@ func (b *OllamaBackend) ensureModel() error {
 		return fmt.Errorf("failed to pull model (status %d): %s", pullResp.StatusCode, string(body))
 	}
 
-	io.ReadAll(pullResp.Body)
+	var progress struct {
+		Status    string `json:"status"`
+		Error     string `json:"error"`
+		Total     int64  `json:"total"`
+		Completed int64  `json:"completed"`
+	}
+	lastDecile := -1
+	scanner := bufio.NewScanner(pullResp.Body)
+	for scanner.Scan() {
+		if json.Unmarshal(scanner.Bytes(), &progress) != nil {
+			continue
+		}
+		if progress.Error != "" {
+			return fmt.Errorf("failed to pull model: %s", progress.Error)
+		}
+		if progress.Total > 0 {
+			if decile := int(progress.Completed * 10 / progress.Total); decile > lastDecile {
+				lastDecile = decile
+				b.logFn("    downloading %s: %d%%", b.model, decile*10)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("model download interrupted: %w", err)
+	}
+	if progress.Status != "success" {
+		return fmt.Errorf("model download did not finish (last status: %q)", progress.Status)
+	}
 	b.logFn("  ✓ Model %s downloaded successfully", b.model)
 	return nil
 }
@@ -293,7 +343,7 @@ func applyContextToPrompt(base, gameContext, modName string, modTags []string) s
 
 // runParallelWorkers fans `texts` out across N workers calling translate(text).
 // On the first error, remaining workers exit early. Used by both backends.
-func runParallelWorkers(texts []string, workers int, translate func(string) (string, error), onProgress func(done, total int)) ([]string, error) {
+func runParallelWorkers(ctx context.Context, texts []string, workers int, translate func(string) (string, error), onProgress func(done, total int)) ([]string, error) {
 	total := len(texts)
 	if total == 0 {
 		return nil, nil
@@ -324,6 +374,9 @@ func runParallelWorkers(texts []string, workers int, translate func(string) (str
 			defer wg.Done()
 			for item := range work {
 				mu.Lock()
+				if firstErr == nil && ctx.Err() != nil {
+					firstErr = ctx.Err()
+				}
 				if firstErr != nil {
 					mu.Unlock()
 					return

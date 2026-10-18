@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/lintax/paradox-localize/internal/config"
 	"github.com/lintax/paradox-localize/internal/gui"
@@ -30,18 +34,39 @@ func main() {
 	// The lloc backend is offered only where it can actually run.
 	llocEnv := lloc.Detect()
 
+	// Closing the window cancels ctx: requests in flight are aborted, lloc
+	// is interrupted (it saves and exits), what is done is written, and only
+	// then does the window close.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var started atomic.Bool
+	finished := make(chan struct{})
+
 	g := gui.NewGUI()
 	if llocEnv != nil {
 		g.EnableLloc()
 	}
+	g.OnClose(func() {
+		cancel()
+		if started.Load() {
+			select {
+			case <-finished:
+			case <-time.After(shutdownTimeout):
+			}
+		}
+	})
 	g.ShowSelectionScreen(installedGames, func(sel gui.Selection) {
-		processWithGUI(g, sel, llocEnv)
+		started.Store(true)
+		defer close(finished)
+		processWithGUI(ctx, g, sel, llocEnv)
 	})
 	g.ShowAndRun()
-
-	// the window is closed: do not leave a translation running behind it
-	lloc.Stop()
 }
+
+// shutdownTimeout bounds how long closing the window waits for the work to
+// stop: lloc gets 10 s to exit on its own, its output files are rebuilt,
+// then ours are written. The status line says what is going on meanwhile.
+const shutdownTimeout = 90 * time.Second
 
 // backendConfigFromSelection translates GUI choices into a translation.BackendConfig.
 func backendConfigFromSelection(sel gui.Selection) translation.BackendConfig {
@@ -63,7 +88,7 @@ func backendConfigFromSelection(sel gui.Selection) translation.BackendConfig {
 }
 
 // processWithGUI handles the main processing logic with GUI output.
-func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
+func processWithGUI(ctx context.Context, g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 	debug := true
 
 	g.SetStatus("Initializing...")
@@ -139,7 +164,7 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 	}
 
 	if enableTranslation && sel.BackendType == "lloc" && llocEnv != nil {
-		processWithLloc(g, sel, llocEnv, workshopDir)
+		processWithLloc(ctx, g, sel, llocEnv, workshopDir)
 		return
 	}
 
@@ -157,6 +182,7 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 		g.SetStatus("Initializing translation backend...")
 		g.Log("Initializing translator...")
 		cfg := backendConfigFromSelection(sel)
+		cfg.Ctx = ctx
 		translator, err = translation.NewTranslator(cfg, "en", sel.Language, sel.Game, debug, g.Log)
 		if err != nil {
 			g.Log("ERROR: Failed to initialize translator: %v", err)
@@ -185,7 +211,12 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 	languageStats := make(map[string]int)
 	g.Log("Found %d mods to check\n", totalMods)
 
+	stopped := false
 	for idx, modEntry := range modDirs {
+		if ctx.Err() != nil {
+			stopped = true
+			break
+		}
 		modPath := filepath.Join(workshopDir, modEntry.Name())
 		modName := mod.Name(modPath, modEntry.Name())
 
@@ -231,7 +262,11 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 						continue
 					}
 				}
-				if _, exists := existingConsolidated[key]; exists {
+				// An entry still equal to the English text is the fallback of
+				// an earlier run (a failed request, "All Languages"): translate
+				// it now. One that really reads the same is a cache hit.
+				if existing, exists := existingConsolidated[key]; exists &&
+					!(translator != nil && existing == value) {
 					continue
 				}
 				untranslatedKeys[key] = value
@@ -274,15 +309,16 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 						g.LogUpdate("  🔄 Translating %d new keys [%d/%d]...", totalKeys, done, total)
 					}
 				})
-				if err != nil {
-					g.Log("  ⚠ Batch translation failed: %v, falling back to English", err)
-					for key, englishText := range untranslatedKeys {
-						newTranslations[key] = englishText
-					}
-				} else {
-					for i, key := range keys {
-						newTranslations[key] = results[i]
-					}
+				// results are complete even on an error: what failed is
+				// English, and is translated again on the next run
+				for i, key := range keys {
+					newTranslations[key] = results[i]
+				}
+				if errors.Is(err, context.Canceled) {
+					g.Log("  ⏹ Stopped; the rest of this mod stays in English until the next run")
+				} else if err != nil {
+					g.Log("  ⚠ Translation failed: %v", err)
+					g.Log("    The untranslated part stays in English and is retried on the next run")
 				}
 			} else {
 				if sel.Language == "all" {
@@ -332,6 +368,11 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 		}
 	}
 
+	if stopped {
+		g.SetStatus("Stopped")
+		g.Log("\n⏹ Stopped. Run again to continue: finished work is kept.")
+		return
+	}
 	g.SetStatus("✅ Completed!")
 
 	if sel.Language == "all" {
@@ -365,7 +406,7 @@ func processWithGUI(g *gui.GUI, sel gui.Selection, llocEnv *lloc.Env) {
 // the same consolidated files as the built-in backends. Keys lloc leaves out
 // (script-only values, strings it could not translate safely) are filled with
 // the English text, so the game never shows raw key names.
-func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir string) {
+func processWithLloc(ctx context.Context, g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir string) {
 	langCode := config.LanguageCodes[sel.Language]
 	langName := config.Languages[sel.Language]
 	workspace := filepath.Join(translation.CacheDir(), "lloc", sel.Game)
@@ -388,6 +429,7 @@ func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir s
 		mod       lloc.Mod
 		english   map[string]string
 		modOwner  map[string]string
+		existing  map[string]string // our consolidated file from earlier runs
 		locRoot   string
 		dirName   string
 		processed bool
@@ -401,6 +443,8 @@ func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir s
 		Lang:        config.ISO639Codes[sel.Language],
 		LangName:    langCode,
 		LangDisplay: langName,
+		StyleNotes:  config.GameStyleNotes[sel.Game],
+		Ctx:         ctx,
 		Log:         g.Log,
 		LogUpdate:   g.LogUpdate,
 		Status:      g.SetStatus,
@@ -410,23 +454,41 @@ func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir s
 		steamapps := filepath.Dir(filepath.Dir(filepath.Dir(workshopDir)))
 		job.GameDir = filepath.Join(steamapps, "common", dir)
 	}
+	deps := map[string][]string{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		modPath := filepath.Join(workshopDir, entry.Name())
-		english, modOwner, _, locRoot := localization.ScanModLocalization(modPath, langCode, false)
+		english, modOwner, existing, locRoot := localization.ScanModLocalization(modPath, langCode, false)
 		if len(english) == 0 || locRoot == "" {
 			continue
 		}
-		m := lloc.Mod{ID: entry.Name(), Name: mod.Name(modPath, entry.Name()), Path: modPath, Tags: mod.Tags(modPath)}
-		mods = append(mods, scanned{mod: m, english: english, modOwner: modOwner, locRoot: locRoot, dirName: entry.Name()})
+		chars := 0
+		for _, text := range english {
+			chars += len([]rune(text))
+		}
+		m := lloc.Mod{
+			ID:      entry.Name(),
+			Name:    mod.CleanName(mod.Name(modPath, entry.Name())),
+			Path:    modPath,
+			Tags:    mod.ThemeTags(mod.Tags(modPath)),
+			Strings: len(english),
+			Chars:   chars,
+		}
+		deps[m.ID] = mod.Dependencies(modPath)
+		mods = append(mods, scanned{mod: m, english: english, modOwner: modOwner, existing: existing, locRoot: locRoot, dirName: entry.Name()})
 		job.Mods = append(job.Mods, m)
 	}
+	lloc.AssignGroups(job.Mods, deps)
 	g.Log("Found %d mods with English localization (lloc: %s)\n", len(mods), env.Dir)
 
-	if err := job.Run(); err != nil {
-		g.Log("⚠ lloc stopped: %v", err)
+	runErr := job.Run()
+	switch {
+	case errors.Is(runErr, context.Canceled):
+		g.Log("\n⏹ Stopped. Writing what has been translated so far; run again to continue.")
+	case runErr != nil:
+		g.Log("\n⚠ lloc stopped: %v", runErr)
 		g.Log("Writing what has been translated so far; run again to continue.")
 	}
 
@@ -436,11 +498,18 @@ func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir s
 		translated, _ := localization.ParseLocalizationFile(job.OutputFile(s.mod.ID))
 		all := make(map[string]string, len(s.english))
 		translatedCount, englishCount := 0, 0
+		keptCount := 0
 		for key, englishText := range s.english {
 			if text, ok := translated[key]; ok {
 				all[key] = text
 				translatedCount++
-			} else if _, owned := s.modOwner[key]; !owned {
+			} else if _, owned := s.modOwner[key]; owned {
+				continue
+			} else if old, ok := s.existing[key]; ok && old != englishText {
+				// lloc has nothing for it (yet): keep the earlier translation
+				all[key] = old
+				keptCount++
+			} else {
 				all[key] = englishText
 				englishCount++
 			}
@@ -456,11 +525,21 @@ func processWithLloc(g *gui.GUI, sel gui.Selection, env *lloc.Env, workshopDir s
 		written++
 		translatedTotal += translatedCount
 		englishTotal += englishCount
-		g.Log("  ✅ %s: %d translated, %d kept in English", s.mod.Name, translatedCount, englishCount)
+		if keptCount > 0 {
+			g.Log("  ✅ %s: %d translated, %d from earlier runs, %d kept in English", s.mod.Name, translatedCount, keptCount, englishCount)
+		} else {
+			g.Log("  ✅ %s: %d translated, %d kept in English", s.mod.Name, translatedCount, englishCount)
+		}
 	}
 
+	summary := fmt.Sprintf("Wrote %d mods: %d strings translated, %d kept in English", written, translatedTotal, englishTotal)
+	if runErr != nil {
+		g.SetStatus("⚠ Stopped before the end — run again to continue")
+		g.Log("\n%s", summary)
+		return
+	}
 	g.SetStatus("✅ Completed!")
-	g.Log("\n✅ Completed! Wrote %d mods: %d strings translated, %d kept in English", written, translatedTotal, englishTotal)
+	g.Log("\n✅ Completed! %s", summary)
 	g.Log("\nDone! You can now launch the game and enable the target language.")
 }
 

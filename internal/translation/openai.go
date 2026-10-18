@@ -2,6 +2,7 @@ package translation
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ type OpenAIBackend struct {
 	systemPrompt     string
 	baseSystemPrompt string
 	logFn            LogFunc
+	ctx              context.Context
 }
 
 type openAIChatRequest struct {
@@ -83,6 +85,7 @@ func NewOpenAIBackend(cfg BackendConfig, targetLangName string, logFn LogFunc) (
 			},
 		},
 		logFn: logFn,
+		ctx:   cfg.ctx(),
 	}
 	backend.baseSystemPrompt = buildBaseSystemPrompt(targetLangName)
 	backend.systemPrompt = backend.baseSystemPrompt
@@ -91,7 +94,13 @@ func NewOpenAIBackend(cfg BackendConfig, targetLangName string, logFn LogFunc) (
 	return backend, nil
 }
 
+// TranslateText translates one string, retrying rate limits, server errors
+// and timeouts.
 func (b *OpenAIBackend) TranslateText(text string) (string, error) {
+	return withRetry(b.ctx, b.logFn, func() (string, error) { return b.translateOnce(text) })
+}
+
+func (b *OpenAIBackend) translateOnce(text string) (string, error) {
 	reqBody := openAIChatRequest{
 		Model: b.model,
 		Messages: []openAIMessage{
@@ -107,7 +116,7 @@ func (b *OpenAIBackend) TranslateText(text string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", b.baseURL+"/chat/completions", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(b.ctx, "POST", b.baseURL+"/chat/completions", bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -120,9 +129,12 @@ func (b *OpenAIBackend) TranslateText(text string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("openai response interrupted: %w", err)
+	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("openai returned status %d: %s", resp.StatusCode, string(body))
+		return "", newStatusError("openai", resp, body)
 	}
 
 	var chatResp openAIChatResponse
@@ -140,7 +152,7 @@ func (b *OpenAIBackend) TranslateText(text string) (string, error) {
 }
 
 func (b *OpenAIBackend) TranslateBatch(texts []string, onProgress func(done, total int)) ([]string, error) {
-	return runParallelWorkers(texts, openAIParallelWorkers, b.TranslateText, onProgress)
+	return runParallelWorkers(b.ctx, texts, openAIParallelWorkers, b.TranslateText, onProgress)
 }
 
 func (b *OpenAIBackend) SetContext(gameContext, modName string, modTags []string) {

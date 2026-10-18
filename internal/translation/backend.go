@@ -1,6 +1,9 @@
 package translation
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // Backend performs raw text translation without caching or placeholder handling.
 type Backend interface {
@@ -33,6 +36,17 @@ type BackendConfig struct {
 	BaseURL string // override server URL (optional for Ollama, required for OpenAI)
 	Model   string // model name (optional, defaults per backend)
 	APIKey  string // OpenAI-compatible API key (ignored by Ollama)
+
+	// Ctx stops the backend: requests in flight are aborted and no new ones
+	// are sent. nil = never stopped.
+	Ctx context.Context
+}
+
+func (cfg BackendConfig) ctx() context.Context {
+	if cfg.Ctx == nil {
+		return context.Background()
+	}
+	return cfg.Ctx
 }
 
 // NewBackend constructs a Backend from a config.

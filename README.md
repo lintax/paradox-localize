@@ -63,7 +63,9 @@ A third backend, "lloc (Ollama Cloud)", appears in the list when all of these ar
 
 Each string is translated by two cloud models and compared by a third; game script syntax is validated instead of masked; and terminology comes from the game's own official localization, which is read once from the game's install folder. Mod entries left in English by the author are always re-translated. Anything lloc leaves out is filled with the English text, as with the other backends.
 
-Its state lives in `<cache dir>/lloc/<game>/` and is incremental: an interrupted run continues where it stopped, and "Clear translation cache" removes it.
+Its state lives in `<cache dir>/lloc/<game>/` and is incremental: an interrupted run continues where it stopped, and "Clear translation cache" removes it. If lloc stops on a fatal error (a dropped connection, a crash), the run is restarted automatically up to three times; a mod lloc cannot read is skipped without losing its earlier translations.
+
+Each mod is described to the translator by the game, game-specific rules (how names are handled, whose voice event options use), the mod's name without version labels and its subject tags. Mods that depend on another installed mod are grouped with it, so a sub-mod reuses the names and terms of the mod it extends. Mods with long texts get smaller requests, so that a reply does not time out.
 
 ---
 
@@ -77,6 +79,10 @@ Its state lives in `<cache dir>/lloc/<game>/` and is incremental: an interrupted
    - `zz_<modid>_consolidated_l_<lang>.yml` (sorts last)
    This is a deliberate hack: different Paradox games use different load-order rules for localization files (FIOS = first-in-order-sorted, others use reverse-alpha), and writing both prefixes guarantees our file wins regardless. The two files are hardlinked on platforms that allow it, so storage cost is negligible.
 5. Caches translations per `(game, source-lang, target-lang)` triple so re-runs and other mods that share strings get cache hits.
+
+Rate limits, server errors and timeouts are retried with growing waits. If a mod still cannot be finished, its untranslated strings are written in English and translated on the next run: an entry still identical to the English text is never taken for a finished translation.
+
+Closing the window stops the work cleanly: requests in flight are cancelled, lloc is interrupted, and what is done is written before the window closes. Files are written to a temporary name and renamed, so an interruption never leaves a half-written file.
 
 ### Placeholder protection
 

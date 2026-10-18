@@ -81,7 +81,11 @@ build-mac-arm: $(MAC_ARM_BIN) ## Cross-compile macOS Apple Silicon binary (needs
 
 build-all: build-linux build-windows build-mac-intel build-mac-arm ## Build all four platforms
 
-release: clean build-all ## Clean rebuild of every platform (use for tagged releases)
+# The platforms build in parallel: a cold Windows build alone takes minutes
+# (see the Windows recipe), the others then finish in its shadow.
+release: ## Clean rebuild of every platform (use for tagged releases)
+	$(MAKE) clean
+	$(MAKE) -j4 --output-sync=target build-all
 	@echo
 	@echo "Built artifacts:"
 	@ls -lh $(BIN_DIR)/
@@ -96,7 +100,11 @@ FORCE:
 $(LINUX_BIN): FORCE | $(BIN_DIR)
 	$(GO) build -ldflags "$(LDFLAGS)" -o $@ .
 
+# mingw-w64 needs about 3 minutes, silently, to compile the C part of go-gl
+# (github.com/go-gl/gl) when Go's build cache is cold: after a Go upgrade or
+# `go clean -cache`. Later builds take seconds.
 $(WINDOWS_BIN): FORCE | $(BIN_DIR)
+	@echo "Windows: the first build after a Go upgrade or a cache clean takes ~3 min (go-gl through mingw)..."
 	CC=$(WIN_AMD64_CC) CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
 	    $(GO) build -ldflags "$(LDFLAGS)" -o $@ .
 

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -495,6 +496,25 @@ func (g *GUI) showError(message string) {
 		g.window.Canvas(),
 	)
 	popup.Show()
+}
+
+// OnClose runs stop when the user closes the window, then closes it. stop
+// runs off the UI thread, so it may wait for work to wind down; the status
+// line says what is happening meanwhile. A second close request while stop
+// is still running closes the window at once.
+func (g *GUI) OnClose(stop func()) {
+	var closing atomic.Bool
+	g.window.SetCloseIntercept(func() {
+		if closing.Swap(true) {
+			g.window.Close()
+			return
+		}
+		g.SetStatus("Stopping: saving what is done...")
+		go func() {
+			stop()
+			fyne.Do(g.window.Close)
+		}()
+	})
 }
 
 // ShowAndRun displays the window and runs the application.

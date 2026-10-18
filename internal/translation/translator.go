@@ -115,6 +115,9 @@ const translatorChunkSize = 4 // matches parallel worker count for responsive up
 // TranslateBatch translates multiple strings efficiently using backend batching.
 // Cache is saved to disk after every chunk to avoid losing work on app close.
 // onProgress receives (done, total, eta string).
+//
+// On an error the results are still complete: what was translated before it,
+// and the original text for the rest. The error says the run was cut short.
 func (t *Translator) TranslateBatch(texts []string, onProgress func(done, total int, eta string)) ([]string, error) {
 	results := make([]string, len(texts))
 	total := len(texts)
@@ -149,6 +152,7 @@ func (t *Translator) TranslateBatch(texts []string, onProgress func(done, total 
 			continue
 		}
 
+		results[i] = text // until translated
 		pending = append(pending, pendingItem{
 			index:        i,
 			cleanText:    cleanText,
@@ -188,7 +192,7 @@ func (t *Translator) TranslateBatch(texts []string, onProgress func(done, total 
 		// Translate chunk
 		translated, err := t.backend.TranslateBatch(chunkTexts, nil)
 		if err != nil {
-			return nil, err
+			return results, err
 		}
 
 		// Validate, cache, restore placeholders
@@ -219,7 +223,7 @@ func (t *Translator) TranslateBatch(texts []string, onProgress func(done, total 
 		}
 
 		if placeholderLost > 0 {
-			fmt.Printf("    ⚠ %d/%d items lost placeholders, using original text\n", placeholderLost, len(chunk))
+			t.logFn("    ⚠ %d/%d items lost placeholders, using original text", placeholderLost, len(chunk))
 		}
 
 		// Save cache to disk after each chunk

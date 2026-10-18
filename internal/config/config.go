@@ -80,12 +80,33 @@ var ISO639Codes = map[string]string{
 
 // GameContexts provides genre/setting descriptions for each game to improve LLM translation quality
 var GameContexts = map[string]string{
-	"eu5":       "a historical grand strategy game set in the early modern period (1444-1821), featuring diplomacy, warfare, trade, and colonization",
+	"eu5":       "a historical grand strategy game spanning the late Middle Ages and the early modern period (1337-1837), featuring diplomacy, warfare, trade, estates, and colonization",
 	"ck3":       "a historical grand strategy RPG set in the medieval period (867-1453), featuring dynasty management, feudal politics, warfare, and religious conflicts",
 	"vic3":      "a historical grand strategy game set in the Victorian era (1836-1936), featuring industrialization, politics, economics, and diplomacy",
 	"hoi4":      "a historical grand strategy wargame set during World War II (1936-1948), featuring military operations, production, and wartime diplomacy",
 	"stellaris": "a sci-fi grand strategy game set in space, featuring space exploration, alien civilizations, interstellar warfare, and galactic politics",
 	"imperator": "a historical grand strategy game set in the classical antiquity (304-27 BC), featuring Roman and Hellenistic civilizations, warfare, and governance",
+}
+
+// GameStyleNotes are per-game localization rules passed to translators that
+// take free-form context (lloc). They cover what differs between the games:
+// how names are handled and whose voice event options are written in.
+var GameStyleNotes = map[string]string{
+	"eu5": "Real countries, rulers, dynasties and places use their established historical names in the target language. " +
+		"Event options are short decisions of the player's country.",
+	"ck3": "Real historical people, dynasties, titles and places use their established names in the target language; " +
+		"feudal and religious titles follow the official translation. " +
+		"Event options are short lines spoken by the player's character, in first person.",
+	"vic3": "Real countries, people and places use their established names in the target language; " +
+		"political, economic and industrial terms follow the official translation. " +
+		"Event options are short decisions of the player's country.",
+	"hoi4": "Real people, countries, military units, equipment and places use their established names in the target language; " +
+		"military terminology follows the official translation. " +
+		"Event options are short replies of the player's country.",
+	"stellaris": "Invented species, ship, planet and star names are transliterated, not translated, unless the examples show otherwise. " +
+		"Event options are short replies of the player's empire.",
+	"imperator": "Ancient people, peoples and places use their established classical forms in the target language. " +
+		"Event options are short decisions of the player's country or its ruler.",
 }
 
 const Version = "1.0.0"

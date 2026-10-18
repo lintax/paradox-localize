@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -29,30 +30,69 @@ func Name(modPath, fallbackID string) string {
 
 // Tags returns the mod's tags from descriptor.mod, or nil if none are present.
 func Tags(modPath string) []string {
+	return descriptorList(modPath, "tags")
+}
+
+// Dependencies returns the names of the mods this mod requires, from
+// descriptor.mod's dependencies block, or nil if there are none.
+func Dependencies(modPath string) []string {
+	return descriptorList(modPath, "dependencies")
+}
+
+// descriptorList reads a block of quoted strings such as
+// tags={ "Gameplay" "Fixes" }, written on one line or on several.
+func descriptorList(modPath, key string) []string {
 	data, err := os.ReadFile(filepath.Join(modPath, "descriptor.mod"))
 	if err != nil {
 		return nil
 	}
-
-	content := string(data)
-	tagsStart := strings.Index(content, "tags={")
-	if tagsStart < 0 {
+	block := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*\{([^}]*)\}`).FindSubmatch(data)
+	if block == nil {
 		return nil
 	}
-	tagsEnd := strings.Index(content[tagsStart:], "}")
-	if tagsEnd < 0 {
-		return nil
-	}
-
-	tagsBlock := content[tagsStart+len("tags={") : tagsStart+tagsEnd]
-	var tags []string
-	for _, line := range strings.Split(tagsBlock, "\n") {
-		line = strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "\""))
-		if line != "" {
-			tags = append(tags, line)
+	var items []string
+	for _, m := range quotedRe.FindAllSubmatch(block[1], -1) {
+		if item := strings.TrimSpace(string(m[1])); item != "" {
+			items = append(items, item)
 		}
 	}
-	return tags
+	return items
+}
+
+var quotedRe = regexp.MustCompile(`"([^"]*)"`)
+
+// versionRe matches version labels in mod titles: "[3.12]", "(v4.0.2)",
+// "{1.9}", "- v2.1", "v1.0".
+var versionRe = regexp.MustCompile(`(?i)\s*[\[({][^\])}]*\d[^\])}]*[\])}]|\s*[-–]?\s*\bv?\d+(\.\d+)+\w*\b`)
+
+// CleanName strips version labels from a mod title, which only distract a
+// translator: "[3.12] Gigastructural Engineering & More (4.0)" becomes
+// "Gigastructural Engineering & More".
+func CleanName(name string) string {
+	cleaned := strings.Trim(versionRe.ReplaceAllString(name, ""), " -–|:")
+	if cleaned == "" {
+		return strings.TrimSpace(name)
+	}
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+// genericTags say nothing about a mod's subject matter.
+var genericTags = map[string]bool{
+	"gameplay": true, "fixes": true, "utilities": true, "balance": true,
+	"graphics": true, "sound": true, "translation": true, "loading screen": true,
+	"user interface": true, "ui": true, "events": true, "historical": true,
+	"overhaul": true, "map": true,
+}
+
+// ThemeTags keeps only the tags that describe what a mod is about.
+func ThemeTags(tags []string) []string {
+	var out []string
+	for _, tag := range tags {
+		if !genericTags[strings.ToLower(tag)] {
+			out = append(out, tag)
+		}
+	}
+	return out
 }
 
 func nameFromMetadata(modPath string) string {
